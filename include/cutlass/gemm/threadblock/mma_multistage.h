@@ -53,6 +53,61 @@ namespace threadblock {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+/// No-op doorbell policy (default, zero overhead when inlined)
+struct NoDoorbellPolicy {
+  int total_k_iters;
+
+  CUTLASS_DEVICE
+  NoDoorbellPolicy() : total_k_iters(0) {}
+
+  CUTLASS_DEVICE
+  void configure(uint32_t*, int) {}
+
+  CUTLASS_DEVICE
+  void set_pipeline_offset(int) {}
+
+  CUTLASS_DEVICE
+  void on_k_tile_issue(int) {}
+};
+
+/// Prefetch doorbell policy: fires ATOMG START at chunk boundaries
+struct PrefetchDoorbellPolicy {
+  uint32_t* db_start_base;
+  int chunk_size;
+  int total_k_iters;
+  int pipeline_offset;
+
+  CUTLASS_DEVICE
+  PrefetchDoorbellPolicy()
+      : db_start_base(nullptr), chunk_size(1), total_k_iters(0), pipeline_offset(0) {}
+
+  CUTLASS_DEVICE
+  void configure(uint32_t* db_start_base_, int chunk_size_) {
+    db_start_base = db_start_base_;
+    chunk_size = chunk_size_ > 0 ? chunk_size_ : 1;
+  }
+
+  CUTLASS_DEVICE
+  void set_pipeline_offset(int pipeline_offset_) {
+    pipeline_offset = pipeline_offset_;
+  }
+
+  CUTLASS_DEVICE
+  void on_k_tile_issue(int tile_idx) {
+    if (db_start_base == nullptr) return;
+    if (tile_idx < 0 || tile_idx >= total_k_iters) return;
+    if (tile_idx % chunk_size == 0) {
+      int chunk_idx = tile_idx / chunk_size;
+      if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
+        atomicExch(&db_start_base[chunk_idx * 2], 0u);      // A descriptor
+        atomicExch(&db_start_base[chunk_idx * 2 + 1], 0u);  // B descriptor
+      }
+    }
+  }
+};
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
 /// Structure to compute the matrix product targeting CUDA cores and SIMT math
 /// instructions.
 template <
@@ -86,9 +141,11 @@ template <
     int Stages,
     /// Use zfill or predicate for out-of-bound cp.async
     SharedMemoryClearOption SharedMemoryClear = SharedMemoryClearOption::kNone,
+    /// Doorbell policy for L2 software prefetcher (default: no-op)
+    typename DoorbellPolicy_ = NoDoorbellPolicy,
     /// Used for partial specialization
     typename Enable = bool>
-class MmaMultistage : 
+class MmaMultistage :
   public MmaBase<Shape_, Policy_, Stages> {
 public:
   ///< Base class
@@ -103,6 +160,8 @@ public:
   using ElementC = ElementC_;
   ///< Layout of accumulator matrix
   using LayoutC = LayoutC_;
+  ///< Doorbell policy type
+  using DoorbellPolicy = DoorbellPolicy_;
   ///< Policy describing tuning details
   using Policy = Policy_;
 
@@ -205,6 +264,9 @@ public:
   /// Shared memory read stage index
   int smem_read_stage_idx_;
 
+  /// L2 prefetcher doorbell policy
+  DoorbellPolicy doorbell_policy_;
+
 
 public:
 
@@ -243,6 +305,11 @@ public:
         {warp_idx_m, Base::kWarpGemmIterations * warp_idx_k});
     this->warp_tile_iterator_B_.add_tile_offset(
         {Base::kWarpGemmIterations * warp_idx_k, warp_idx_n});
+  }
+
+  CUTLASS_DEVICE
+  void configure_doorbell_policy(uint32_t* db_start_base, int chunk_size) {
+    doorbell_policy_.configure(db_start_base, chunk_size);
   }
 
   /// Advance shared memory read-iterators to the next stage
@@ -368,6 +435,8 @@ public:
     // Issue several complete stages
     CUTLASS_PRAGMA_UNROLL
     for (int stage = 0; stage < Base::kStages - 1; ++stage, --gemm_k_iterations) {
+
+      doorbell_policy_.on_k_tile_issue(stage);
 
       // Disable global fetching if done with global fetch iterations
       iterator_A.clear_mask(gemm_k_iterations == 0);
@@ -647,6 +716,9 @@ public:
     // Mainloop
     CUTLASS_GEMM_LOOP
     for (; gemm_k_iterations > (-Base::kStages + 1);) {
+      int issued_tile_idx = doorbell_policy_.total_k_iters - gemm_k_iterations;
+      doorbell_policy_.on_k_tile_issue(issued_tile_idx);
+
       mac_loop_iter(
         pipe_state,
         accum,
@@ -716,6 +788,9 @@ public:
       IteratorB iterator_B,
       ///< initial value of accumulator
       FragmentC const &src_accum) {
+
+    doorbell_policy_.total_k_iters = gemm_k_iterations;
+    doorbell_policy_.set_pipeline_offset(Base::kStages - 1);
 
     // Prologue (start fetching iterations of global fragments into shared memory)
     prologue(iterator_A, iterator_B, gemm_k_iterations);

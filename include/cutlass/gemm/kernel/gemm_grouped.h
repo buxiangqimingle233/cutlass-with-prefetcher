@@ -55,6 +55,26 @@ namespace kernel {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+namespace detail {
+
+template <typename Mma>
+CUTLASS_DEVICE auto configure_doorbell_policy(
+    Mma &mma,
+    uint32_t *db_start_base,
+    int db_chunk_size,
+    int) -> decltype(mma.configure_doorbell_policy(db_start_base, db_chunk_size), void()) {
+  mma.configure_doorbell_policy(db_start_base, db_chunk_size);
+}
+
+template <typename Mma>
+CUTLASS_DEVICE void configure_doorbell_policy(Mma &, uint32_t *, int, long) {}
+
+}  // namespace detail
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
 template <
   typename Mma_,                           ///! Threadblock-scoped matrix multiply-accumulate
   typename Epilogue_,                      ///! Epilogue
@@ -152,6 +172,9 @@ public:
     // Only used by device-level operator
     GemmCoord *host_problem_sizes{nullptr};
 
+    // L2 software prefetcher doorbell buffer (optional)
+    uint32_t *db_start_base{nullptr};
+    int db_chunk_size{1};
 
     //
     // Methods
@@ -162,7 +185,7 @@ public:
 
     /// Ctor
     CUTLASS_HOST_DEVICE
-    Arguments(    
+    Arguments(
       GemmCoord *problem_sizes,
       int problem_count,
       int threadblock_count,
@@ -175,8 +198,10 @@ public:
       typename LayoutB::Stride::LongIndex *ldb,
       typename LayoutC::Stride::LongIndex *ldc,
       typename LayoutC::Stride::LongIndex *ldd,
-      GemmCoord *host_problem_sizes=nullptr
-    ): 
+      GemmCoord *host_problem_sizes=nullptr,
+      uint32_t *db_start_base=nullptr,
+      int db_chunk_size=1
+    ):
       problem_sizes(problem_sizes),
       problem_count(problem_count),
       threadblock_count(threadblock_count),
@@ -189,7 +214,9 @@ public:
       ldb(ldb),
       ldc(ldc),
       ldd(ldd),
-      host_problem_sizes(host_problem_sizes)
+      host_problem_sizes(host_problem_sizes),
+      db_start_base(db_start_base),
+      db_chunk_size(db_chunk_size)
     {
 
     }
@@ -217,6 +244,10 @@ public:
     typename LayoutC::Stride::LongIndex *ldc{nullptr};
     typename LayoutC::Stride::LongIndex *ldd{nullptr};
 
+    // L2 software prefetcher doorbell buffer (optional)
+    uint32_t *db_start_base{nullptr};
+    int db_chunk_size{1};
+
     //
     // Methods
     //
@@ -237,8 +268,10 @@ public:
       lda(args.lda),
       ldb(args.ldb),
       ldc(args.ldc),
-      ldd(args.ldd)
-    { 
+      ldd(args.ldd),
+      db_start_base(args.db_start_base),
+      db_chunk_size(args.db_chunk_size)
+    {
 
     }
 
@@ -260,6 +293,8 @@ public:
       ldb = args.ldb;
       ldc = args.ldc;
       ldd = args.ldd;
+      db_start_base = args.db_start_base;
+      db_chunk_size = args.db_chunk_size;
     }
   };
 
@@ -381,6 +416,7 @@ public:
 
       // Construct thread-scoped matrix multiply
       Mma mma(shared_storage.kernel.main_loop, thread_idx, warp_idx, lane_idx);
+      detail::configure_doorbell_policy(mma, params.db_start_base, params.db_chunk_size, 0);
 
       // Compute threadblock-scoped matrix multiply-add
       int gemm_k_iterations = (problem_size.k() + Mma::Shape::kK - 1) / Mma::Shape::kK;

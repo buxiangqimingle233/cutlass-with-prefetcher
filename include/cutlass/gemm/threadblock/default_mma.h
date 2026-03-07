@@ -49,6 +49,7 @@
 #include "cutlass/gemm/threadblock/default_mma_core_sm70.h"
 #include "cutlass/gemm/threadblock/default_mma_core_sm75.h"
 #include "cutlass/gemm/threadblock/default_mma_core_sm80.h"
+#include "cutlass/gemm/threadblock/mma_multistage.h"
 
 #if defined(CUTLASS_ARCH_WMMA_ENABLED)
 #include "cutlass/gemm/threadblock/default_mma_core_wmma.h"
@@ -105,7 +106,9 @@ template <
     /// Permute operand A
     typename PermuteALayout = layout::NoPermute,
     /// Permute operand B
-    typename PermuteBLayout = layout::NoPermute
+    typename PermuteBLayout = layout::NoPermute,
+    /// Doorbell policy for L2 software prefetcher
+    typename DoorbellPolicy = NoDoorbellPolicy
     >
 struct DefaultMma;
 
@@ -146,13 +149,15 @@ template <
     /// Permute operand A
     typename PermuteALayout,
     /// Permute operand B
-    typename PermuteBLayout
+    typename PermuteBLayout,
+    /// Doorbell policy for L2 software prefetcher
+    typename DoorbellPolicy
     >
 struct DefaultMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
                   kAlignmentB, ElementAccumulator, LayoutC,
                   arch::OpClassSimt, ArchTag, ThreadblockShape, WarpShape,
                   InstructionShape, 2, Operator, false, SharedMemoryClearOption::kNone,
-                  GatherA, GatherB, PermuteALayout, PermuteBLayout> {
+                  GatherA, GatherB, PermuteALayout, PermuteBLayout, DoorbellPolicy> {
 
   static_assert(platform::is_same<LayoutC, layout::RowMajor>::value
              || platform::is_same<LayoutC, layout::AffineRankN<2>>::value,
@@ -222,13 +227,15 @@ template <
     /// Permute operand A
     typename PermuteALayout,
     /// Permute operand B
-    typename PermuteBLayout
+    typename PermuteBLayout,
+    /// Doorbell policy for L2 software prefetcher
+    typename DoorbellPolicy
     >
 struct DefaultMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
                   kAlignmentB, ElementAccumulator, layout::RowMajor,
                   arch::OpClassTensorOp, ArchTag, ThreadblockShape, WarpShape,
                   InstructionShape, 2, Operator, false, SharedMemoryClear,
-                  GatherA, GatherB, PermuteALayout, PermuteBLayout> {
+                  GatherA, GatherB, PermuteALayout, PermuteBLayout, DoorbellPolicy> {
   // Define the MmaCore components
   using MmaCore = typename cutlass::gemm::threadblock::DefaultMmaCore<
       ThreadblockShape, WarpShape, InstructionShape, ElementA, LayoutA,
@@ -284,13 +291,15 @@ template <
     /// Permute operand A
     typename PermuteALayout,
     /// Permute operand B
-    typename PermuteBLayout
+    typename PermuteBLayout,
+    /// Doorbell policy for L2 software prefetcher
+    typename DoorbellPolicy
     >
 struct DefaultMma<float, LayoutA, kAlignmentA, float, LayoutB,
                   kAlignmentB, float, layout::RowMajor,
                   arch::OpClassTensorOp, ArchTag, ThreadblockShape, WarpShape,
                   InstructionShape, 2, Operator, false, SharedMemoryClearOption::kNone,
-                  GatherA, GatherB, PermuteALayout, PermuteBLayout> {
+                  GatherA, GatherB, PermuteALayout, PermuteBLayout, DoorbellPolicy> {
   // Define the MmaCore components
   using MmaCore = typename cutlass::gemm::threadblock::DefaultMmaCore<
       ThreadblockShape, WarpShape, InstructionShape, float, LayoutA, float,
@@ -349,13 +358,15 @@ template <
     /// Operation performed by GEMM
     typename Operator,
     /// Number of Interleaved K
-    int InterleavedK>
+    int InterleavedK,
+    /// Doorbell policy for L2 software prefetcher
+    typename DoorbellPolicy>
 struct DefaultMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
                   kAlignmentB, ElementAccumulator,
                   layout::ColumnMajorInterleaved<InterleavedK>, OperatorClass,
                   ArchTag, ThreadblockShape, WarpShape, InstructionShape, 2,
                   Operator, true, SharedMemoryClearOption::kNone, false, false,
-                  layout::NoPermute, layout::NoPermute> {
+                  layout::NoPermute, layout::NoPermute, DoorbellPolicy> {
   // Define the MmaCore components
   using MmaCore = typename cutlass::gemm::threadblock::DefaultMmaCore<
       ThreadblockShape, WarpShape, InstructionShape, ElementA, LayoutA,
@@ -426,13 +437,15 @@ template <
     /// Permute operand A
     typename PermuteALayout,
     /// Permute operand B
-    typename PermuteBLayout
+    typename PermuteBLayout,
+    /// Doorbell policy for L2 software prefetcher
+    typename DoorbellPolicy
     >
 struct DefaultMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
                   kAlignmentB, ElementAccumulator, LayoutC,
                   arch::OpClassSimt, ArchTag, ThreadblockShape, WarpShape,
                   InstructionShape, Stages, Operator, false, SharedMemoryClearOption::kNone,
-                  GatherA, GatherB, PermuteALayout, PermuteBLayout> {
+                  GatherA, GatherB, PermuteALayout, PermuteBLayout, DoorbellPolicy> {
 
   static_assert(platform::is_same<LayoutC, layout::RowMajor>::value
              || platform::is_same<LayoutC, layout::AffineRankN<2>>::value,
@@ -465,7 +478,8 @@ struct DefaultMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
       typename MmaCore::Shape, IteratorA, typename MmaCore::SmemIteratorA,
       MmaCore::kCacheOpA, IteratorB, typename MmaCore::SmemIteratorB,
       MmaCore::kCacheOpB, ElementAccumulator, LayoutC,
-      typename MmaCore::MmaPolicy, Stages>;
+      typename MmaCore::MmaPolicy, Stages, SharedMemoryClearOption::kNone,
+      DoorbellPolicy>;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -509,13 +523,15 @@ template <
     /// Permute operand A
     typename PermuteALayout,
     /// Permute operand B
-    typename PermuteBLayout
+    typename PermuteBLayout,
+    /// Doorbell policy for L2 software prefetcher
+    typename DoorbellPolicy
     >
 struct DefaultMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
                   kAlignmentB, ElementAccumulator, LayoutC,
                   arch::OpClassTensorOp, ArchTag, ThreadblockShape, WarpShape,
                   InstructionShape, Stages, Operator, false, SharedMemoryClear,
-                  GatherA, GatherB, PermuteALayout, PermuteBLayout> {
+                  GatherA, GatherB, PermuteALayout, PermuteBLayout, DoorbellPolicy> {
 
   static_assert(platform::is_same<LayoutC, layout::RowMajor>::value
              || platform::is_same<LayoutC, layout::AffineRankN<2>>::value,
@@ -558,7 +574,7 @@ struct DefaultMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
       typename MmaCore::Shape, IteratorA, typename MmaCore::SmemIteratorA,
       MmaCore::kCacheOpA, IteratorB, typename MmaCore::SmemIteratorB,
       MmaCore::kCacheOpB, ElementAccumulator, LayoutC,
-      typename MmaCore::MmaPolicy, Stages, SharedMemoryClear>;
+      typename MmaCore::MmaPolicy, Stages, SharedMemoryClear, DoorbellPolicy>;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -594,13 +610,15 @@ template <
     /// Operation performed by GEMM
     typename Operator,
     /// Number of Interleaved K
-    int InterleavedK>
+    int InterleavedK,
+    /// Doorbell policy for L2 software prefetcher
+    typename DoorbellPolicy>
 struct DefaultMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
                   kAlignmentB, ElementAccumulator,
                   layout::ColumnMajorInterleaved<InterleavedK>, OperatorClass,
                   ArchTag, ThreadblockShape, WarpShape, InstructionShape,
                   Stages, Operator, true, SharedMemoryClearOption::kNone, 
-                  false, false, layout::NoPermute, layout::NoPermute> {
+                  false, false, layout::NoPermute, layout::NoPermute, DoorbellPolicy> {
   // Define the MmaCore components
   using MmaCore = typename cutlass::gemm::threadblock::DefaultMmaCore<
       ThreadblockShape, WarpShape, InstructionShape, ElementA, LayoutA,
@@ -629,7 +647,8 @@ struct DefaultMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
       typename MmaCore::Shape, IteratorA, typename MmaCore::SmemIteratorA,
       MmaCore::kCacheOpA, IteratorB, typename MmaCore::SmemIteratorB,
       MmaCore::kCacheOpB, ElementAccumulator, layout::RowMajor,
-      typename MmaCore::MmaPolicy, Stages>;
+      typename MmaCore::MmaPolicy, Stages, SharedMemoryClearOption::kNone,
+      DoorbellPolicy>;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -653,12 +672,14 @@ template <
     /// Operation performed by GEMM
     typename Operator,
     /// Warp-level tile size (concept: GemmShape)
-    typename WarpShape>
+    typename WarpShape,
+    /// Doorbell policy for L2 software prefetcher
+    typename DoorbellPolicy>
 struct DefaultMma<int8_t, LayoutA, kAlignmentA, int8_t, LayoutB, kAlignmentB,
                   ElementAccumulator, layout::RowMajor, arch::OpClassSimt,
                   ArchTag, ThreadblockShape, WarpShape, GemmShape<1, 1, 4>, 2,
                   Operator, false, SharedMemoryClearOption::kNone,
-                  false, false, layout::NoPermute, layout::NoPermute> {
+                  false, false, layout::NoPermute, layout::NoPermute, DoorbellPolicy> {
   using InstructionShape = GemmShape<1, 1, 4>;
   using ElementA = int8_t;
   using ElementB = int8_t;
@@ -722,12 +743,14 @@ template <
     /// Instruction-level tile size (concept: GemmShape)
     typename InstructionShape,
     /// Operation performed by GEMM
-    typename Operator>
+    typename Operator,
+    /// Doorbell policy for L2 software prefetcher
+    typename DoorbellPolicy>
 struct DefaultMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
                   kAlignmentB, ElementAccumulator, LayoutC,
                   arch::OpClassWmmaTensorOp, ArchTag, ThreadblockShape, WarpShape,
                   InstructionShape, 2, Operator, false, SharedMemoryClearOption::kNone,
-                  false, false, layout::NoPermute, layout::NoPermute> {
+                  false, false, layout::NoPermute, layout::NoPermute, DoorbellPolicy> {
   // Define the MmaCore components
   using MmaCore = typename cutlass::gemm::threadblock::DefaultMmaCore<
       ThreadblockShape, WarpShape, InstructionShape, ElementA, LayoutA,
@@ -782,12 +805,14 @@ template <
     /// Instruction-level tile size (concept: GemmShape)
     typename InstructionShape,
     /// Operation performed by GEMM
-    typename Operator>
+    typename Operator,
+    /// Doorbell policy for L2 software prefetcher
+    typename DoorbellPolicy>
 struct DefaultMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
                   kAlignmentB, ElementAccumulator, LayoutC,
                   arch::OpClassWmmaTensorOp, ArchTag, ThreadblockShape, WarpShape,
                   InstructionShape, 1, Operator, false, SharedMemoryClearOption::kNone,
-                  false, false, layout::NoPermute, layout::NoPermute> {
+                  false, false, layout::NoPermute, layout::NoPermute, DoorbellPolicy> {
   // Define the MmaCore components
   using MmaCore = typename cutlass::gemm::threadblock::DefaultMmaCore<
       ThreadblockShape, WarpShape, InstructionShape, ElementA, LayoutA,

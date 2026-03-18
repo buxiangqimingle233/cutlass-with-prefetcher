@@ -61,7 +61,7 @@ struct NoDoorbellPolicy {
   NoDoorbellPolicy() : total_k_iters(0) {}
 
   CUTLASS_DEVICE
-  void configure(uint32_t*, int) {}
+  void configure(uint32_t*, int, int) {}
 
   CUTLASS_DEVICE
   void set_pipeline_offset(int) {}
@@ -74,17 +74,25 @@ struct NoDoorbellPolicy {
 struct PrefetchDoorbellPolicy {
   uint32_t* db_start_base;
   int chunk_size;
+  int db_n_partitions;
   int total_k_iters;
   int pipeline_offset;
 
-  CUTLASS_DEVICE
-  PrefetchDoorbellPolicy()
-      : db_start_base(nullptr), chunk_size(1), total_k_iters(0), pipeline_offset(0) {}
+  static int const kDoorbellSlotsPerPartition = 64;
 
   CUTLASS_DEVICE
-  void configure(uint32_t* db_start_base_, int chunk_size_) {
+  PrefetchDoorbellPolicy()
+      : db_start_base(nullptr),
+        chunk_size(1),
+        db_n_partitions(0),
+        total_k_iters(0),
+        pipeline_offset(0) {}
+
+  CUTLASS_DEVICE
+  void configure(uint32_t* db_start_base_, int chunk_size_, int db_n_partitions_) {
     db_start_base = db_start_base_;
     chunk_size = chunk_size_ > 0 ? chunk_size_ : 1;
+    db_n_partitions = db_n_partitions_ > 0 ? db_n_partitions_ : 0;
   }
 
   CUTLASS_DEVICE
@@ -99,8 +107,16 @@ struct PrefetchDoorbellPolicy {
     if (tile_idx % chunk_size == 0) {
       int chunk_idx = tile_idx / chunk_size;
       if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
-        atomicExch(&db_start_base[chunk_idx * 2], 0u);      // A descriptor
-        atomicExch(&db_start_base[chunk_idx * 2 + 1], 0u);  // B descriptor
+        if (db_n_partitions > 0) {
+          for (int p = 0; p < db_n_partitions; ++p) {
+            uint32_t* partition_base = db_start_base + p * kDoorbellSlotsPerPartition;
+            atomicExch(&partition_base[chunk_idx * 2], 0u);      // A descriptor
+            atomicExch(&partition_base[chunk_idx * 2 + 1], 0u);  // B descriptor
+          }
+        } else {
+          atomicExch(&db_start_base[chunk_idx * 2], 0u);      // A descriptor
+          atomicExch(&db_start_base[chunk_idx * 2 + 1], 0u);  // B descriptor
+        }
       }
     }
   }
@@ -308,8 +324,9 @@ public:
   }
 
   CUTLASS_DEVICE
-  void configure_doorbell_policy(uint32_t* db_start_base, int chunk_size) {
-    doorbell_policy_.configure(db_start_base, chunk_size);
+  void configure_doorbell_policy(uint32_t* db_start_base, int chunk_size,
+                                 int db_n_partitions) {
+    doorbell_policy_.configure(db_start_base, chunk_size, db_n_partitions);
   }
 
   /// Advance shared memory read-iterators to the next stage
@@ -813,4 +830,3 @@ public:
 }  // namespace cutlass
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
-

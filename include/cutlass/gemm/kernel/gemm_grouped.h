@@ -64,12 +64,14 @@ CUTLASS_DEVICE auto configure_doorbell_policy(
     Mma &mma,
     uint32_t *db_start_base,
     int db_chunk_size,
-    int) -> decltype(mma.configure_doorbell_policy(db_start_base, db_chunk_size), void()) {
-  mma.configure_doorbell_policy(db_start_base, db_chunk_size);
+    int db_n_partitions,
+    int) -> decltype(mma.configure_doorbell_policy(db_start_base, db_chunk_size,
+                                                   db_n_partitions), void()) {
+  mma.configure_doorbell_policy(db_start_base, db_chunk_size, db_n_partitions);
 }
 
 template <typename Mma>
-CUTLASS_DEVICE void configure_doorbell_policy(Mma &, uint32_t *, int, long) {}
+CUTLASS_DEVICE void configure_doorbell_policy(Mma &, uint32_t *, int, int, long) {}
 
 }  // namespace detail
 
@@ -175,6 +177,7 @@ public:
     // L2 software prefetcher doorbell buffer (optional)
     uint32_t *db_start_base{nullptr};
     int db_chunk_size{1};
+    int db_n_partitions{0};
 
     //
     // Methods
@@ -200,7 +203,8 @@ public:
       typename LayoutC::Stride::LongIndex *ldd,
       GemmCoord *host_problem_sizes=nullptr,
       uint32_t *db_start_base=nullptr,
-      int db_chunk_size=1
+      int db_chunk_size=1,
+      int db_n_partitions=0
     ):
       problem_sizes(problem_sizes),
       problem_count(problem_count),
@@ -216,7 +220,8 @@ public:
       ldd(ldd),
       host_problem_sizes(host_problem_sizes),
       db_start_base(db_start_base),
-      db_chunk_size(db_chunk_size)
+      db_chunk_size(db_chunk_size),
+      db_n_partitions(db_n_partitions)
     {
 
     }
@@ -247,6 +252,7 @@ public:
     // L2 software prefetcher doorbell buffer (optional)
     uint32_t *db_start_base{nullptr};
     int db_chunk_size{1};
+    int db_n_partitions{0};
 
     //
     // Methods
@@ -270,7 +276,8 @@ public:
       ldc(args.ldc),
       ldd(args.ldd),
       db_start_base(args.db_start_base),
-      db_chunk_size(args.db_chunk_size)
+      db_chunk_size(args.db_chunk_size),
+      db_n_partitions(args.db_n_partitions)
     {
 
     }
@@ -295,6 +302,7 @@ public:
       ldd = args.ldd;
       db_start_base = args.db_start_base;
       db_chunk_size = args.db_chunk_size;
+      db_n_partitions = args.db_n_partitions;
     }
   };
 
@@ -416,7 +424,8 @@ public:
 
       // Construct thread-scoped matrix multiply
       Mma mma(shared_storage.kernel.main_loop, thread_idx, warp_idx, lane_idx);
-      detail::configure_doorbell_policy(mma, params.db_start_base, params.db_chunk_size, 0);
+      detail::configure_doorbell_policy(mma, params.db_start_base, params.db_chunk_size,
+                                        params.db_n_partitions, 0);
 
       // Compute threadblock-scoped matrix multiply-add
       int gemm_k_iterations = (problem_size.k() + Mma::Shape::kK - 1) / Mma::Shape::kK;

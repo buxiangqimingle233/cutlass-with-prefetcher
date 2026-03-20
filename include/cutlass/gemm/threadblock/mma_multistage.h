@@ -101,6 +101,13 @@ struct PrefetchDoorbellPolicy {
   }
 
   CUTLASS_DEVICE
+  int broadcast_slot_offset(int desc_idx, int partition_idx) const {
+    int region_idx = desc_idx / kDoorbellSlotsPerPartition;
+    int slot_idx = desc_idx % kDoorbellSlotsPerPartition;
+    return (region_idx * db_n_partitions + partition_idx) * kDoorbellSlotsPerPartition + slot_idx;
+  }
+
+  CUTLASS_DEVICE
   void on_k_tile_issue(int tile_idx) {
     if (db_start_base == nullptr) return;
     if (tile_idx < 0 || tile_idx >= total_k_iters) return;
@@ -108,10 +115,11 @@ struct PrefetchDoorbellPolicy {
       int chunk_idx = tile_idx / chunk_size;
       if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
         if (db_n_partitions > 0) {
+          int a_desc_idx = chunk_idx * 2;
+          int b_desc_idx = a_desc_idx + 1;
           for (int p = 0; p < db_n_partitions; ++p) {
-            uint32_t* partition_base = db_start_base + p * kDoorbellSlotsPerPartition;
-            atomicExch(&partition_base[chunk_idx * 2], 0u);      // A descriptor
-            atomicExch(&partition_base[chunk_idx * 2 + 1], 0u);  // B descriptor
+            atomicExch(&db_start_base[broadcast_slot_offset(a_desc_idx, p)], 0u);
+            atomicExch(&db_start_base[broadcast_slot_offset(b_desc_idx, p)], 0u);
           }
         } else {
           atomicExch(&db_start_base[chunk_idx * 2], 0u);      // A descriptor

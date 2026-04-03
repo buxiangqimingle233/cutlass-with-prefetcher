@@ -65,13 +65,20 @@ CUTLASS_DEVICE auto configure_doorbell_policy(
     uint32_t *db_start_base,
     int db_chunk_size,
     int db_n_partitions,
-    int) -> decltype(mma.configure_doorbell_policy(db_start_base, db_chunk_size,
-                                                   db_n_partitions), void()) {
-  mma.configure_doorbell_policy(db_start_base, db_chunk_size, db_n_partitions);
+    int problem_idx,
+    int problem_count,
+    int)
+    -> decltype(mma.configure_doorbell_policy(db_start_base, db_chunk_size,
+                                              db_n_partitions, problem_idx,
+                                              problem_count),
+                void()) {
+  mma.configure_doorbell_policy(db_start_base, db_chunk_size, db_n_partitions,
+                                problem_idx, problem_count);
 }
 
 template <typename Mma>
-CUTLASS_DEVICE void configure_doorbell_policy(Mma &, uint32_t *, int, int, long) {}
+CUTLASS_DEVICE void configure_doorbell_policy(Mma &, uint32_t *, int, int, int,
+                                              int, long) {}
 
 }  // namespace detail
 
@@ -424,8 +431,9 @@ public:
 
       // Construct thread-scoped matrix multiply
       Mma mma(shared_storage.kernel.main_loop, thread_idx, warp_idx, lane_idx);
-      detail::configure_doorbell_policy(mma, params.db_start_base, params.db_chunk_size,
-                                        params.db_n_partitions, 0);
+      detail::configure_doorbell_policy(
+        mma, params.db_start_base, params.db_chunk_size, params.db_n_partitions,
+        problem_idx, params.problem_visitor.problem_count, 0);
 
       // Compute threadblock-scoped matrix multiply-add
       int gemm_k_iterations = (problem_size.k() + Mma::Shape::kK - 1) / Mma::Shape::kK;

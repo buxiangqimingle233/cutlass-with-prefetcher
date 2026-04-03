@@ -70,29 +70,43 @@ struct NoDoorbellPolicy {
   void on_k_tile_issue(int) {}
 };
 
-/// Prefetch doorbell policy: fires ATOMG START at chunk boundaries
+/// Prefetch doorbell policy: bootstrap chunk 0, then ring on compute-domain
+/// chunk transitions for semantic X/W slot families.
 struct PrefetchDoorbellPolicy {
   uint32_t* db_start_base;
-  int chunk_size;
+  int chunk_k_tiles;
   int db_n_partitions;
   int total_k_iters;
   int pipeline_offset;
+  int prefetch_distance_tiles;
+  int problem_idx;
+  int problem_count;
+  int weight_idx;
 
   static int const kDoorbellSlotsPerPartition = 64;
 
   CUTLASS_DEVICE
   PrefetchDoorbellPolicy()
       : db_start_base(nullptr),
-        chunk_size(1),
+        chunk_k_tiles(1),
         db_n_partitions(0),
         total_k_iters(0),
-        pipeline_offset(0) {}
+        pipeline_offset(0),
+        prefetch_distance_tiles(1),
+        problem_idx(0),
+        problem_count(0),
+        weight_idx(0) {}
 
   CUTLASS_DEVICE
-  void configure(uint32_t* db_start_base_, int chunk_size_, int db_n_partitions_) {
+  void configure(uint32_t* db_start_base_, int chunk_k_tiles_,
+                 int db_n_partitions_, int problem_idx_,
+                 int problem_count_) {
     db_start_base = db_start_base_;
-    chunk_size = chunk_size_ > 0 ? chunk_size_ : 1;
+    chunk_k_tiles = chunk_k_tiles_ > 0 ? chunk_k_tiles_ : 1;
     db_n_partitions = db_n_partitions_ > 0 ? db_n_partitions_ : 0;
+    problem_idx = problem_idx_ >= 0 ? problem_idx_ : 0;
+    problem_count = problem_count_ > 0 ? problem_count_ : 0;
+    weight_idx = problem_idx;
   }
 
   CUTLASS_DEVICE
@@ -101,31 +115,74 @@ struct PrefetchDoorbellPolicy {
   }
 
   CUTLASS_DEVICE
-  int broadcast_slot_offset(int desc_idx, int partition_idx) const {
-    int region_idx = desc_idx / kDoorbellSlotsPerPartition;
-    int slot_idx = desc_idx % kDoorbellSlotsPerPartition;
-    return (region_idx * db_n_partitions + partition_idx) * kDoorbellSlotsPerPartition + slot_idx;
+  int num_chunks() const {
+    return chunk_k_tiles > 0
+               ? ((total_k_iters + chunk_k_tiles - 1) / chunk_k_tiles)
+               : 0;
   }
 
   CUTLASS_DEVICE
-  void on_k_tile_issue(int tile_idx) {
-    if (db_start_base == nullptr) return;
-    if (tile_idx < 0 || tile_idx >= total_k_iters) return;
-    if (tile_idx % chunk_size == 0) {
-      int chunk_idx = tile_idx / chunk_size;
-      if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
-        if (db_n_partitions > 0) {
-          int a_desc_idx = chunk_idx * 2;
-          int b_desc_idx = a_desc_idx + 1;
-          for (int p = 0; p < db_n_partitions; ++p) {
-            atomicExch(&db_start_base[broadcast_slot_offset(a_desc_idx, p)], 0u);
-            atomicExch(&db_start_base[broadcast_slot_offset(b_desc_idx, p)], 0u);
-          }
-        } else {
-          atomicExch(&db_start_base[chunk_idx * 2], 0u);      // A descriptor
-          atomicExch(&db_start_base[chunk_idx * 2 + 1], 0u);  // B descriptor
-        }
+  int broadcast_slot_offset(int slot_idx, int partition_idx) const {
+    int region_idx = slot_idx / kDoorbellSlotsPerPartition;
+    int local_slot = slot_idx % kDoorbellSlotsPerPartition;
+    return (region_idx * db_n_partitions + partition_idx) *
+               kDoorbellSlotsPerPartition +
+           local_slot;
+  }
+
+  CUTLASS_DEVICE
+  int x_slot(int chunk_idx) const {
+    return problem_idx * num_chunks() + chunk_idx;
+  }
+
+  CUTLASS_DEVICE
+  int w_slot(int chunk_idx) const {
+    return problem_count * num_chunks() + weight_idx * num_chunks() + chunk_idx;
+  }
+
+  CUTLASS_DEVICE
+  void ring_slot(int slot_idx) const {
+    if (db_n_partitions > 0) {
+      for (int p = 0; p < db_n_partitions; ++p) {
+        atomicExch(&db_start_base[broadcast_slot_offset(slot_idx, p)], 0u);
       }
+    } else {
+      atomicExch(&db_start_base[slot_idx], 0u);
+    }
+  }
+
+  CUTLASS_DEVICE
+  void ring_chunk(int chunk_idx) const {
+    if (chunk_idx < 0 || chunk_idx >= num_chunks()) return;
+    ring_slot(x_slot(chunk_idx));
+    ring_slot(w_slot(chunk_idx));
+  }
+
+  CUTLASS_DEVICE
+  void bootstrap() const {
+    if (db_start_base == nullptr || total_k_iters <= 0) return;
+    if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
+      ring_chunk(0);
+    }
+  }
+
+  CUTLASS_DEVICE
+  void on_k_tile_issue(int issued_tile_idx) {
+    if (db_start_base == nullptr) return;
+    if (issued_tile_idx < 0 || issued_tile_idx >= total_k_iters) return;
+
+    int compute_tile = issued_tile_idx - pipeline_offset;
+    if (compute_tile < 0 || compute_tile >= total_k_iters) return;
+
+    int target_tile = compute_tile + prefetch_distance_tiles;
+    if (target_tile < 0 || target_tile >= total_k_iters) return;
+
+    int current_chunk = compute_tile / chunk_k_tiles;
+    int target_chunk = target_tile / chunk_k_tiles;
+    if (target_chunk == current_chunk) return;
+
+    if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
+      ring_chunk(target_chunk);
     }
   }
 };
@@ -333,8 +390,10 @@ public:
 
   CUTLASS_DEVICE
   void configure_doorbell_policy(uint32_t* db_start_base, int chunk_size,
-                                 int db_n_partitions) {
-    doorbell_policy_.configure(db_start_base, chunk_size, db_n_partitions);
+                                 int db_n_partitions, int problem_idx,
+                                 int problem_count) {
+    doorbell_policy_.configure(db_start_base, chunk_size, db_n_partitions,
+                               problem_idx, problem_count);
   }
 
   /// Advance shared memory read-iterators to the next stage
@@ -816,6 +875,7 @@ public:
 
     doorbell_policy_.total_k_iters = gemm_k_iterations;
     doorbell_policy_.set_pipeline_offset(Base::kStages - 1);
+    doorbell_policy_.bootstrap();
 
     // Prologue (start fetching iterations of global fragments into shared memory)
     prologue(iterator_A, iterator_B, gemm_k_iterations);
